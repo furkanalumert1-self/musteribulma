@@ -1,0 +1,22 @@
+# env
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Output files (local scraping results — don't commit real lead data)
+leads_raw.json
+leads_ranked.json
+*.csv
+
+# OS
+.DS_Store
+Thumbs.db
