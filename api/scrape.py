@@ -10,15 +10,18 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler
 from typing import Any
+
+from flask import Flask, make_response, request
 
 MAX_LEADS_CAP = 50
 DEFAULT_ACTOR = "compass/crawler-google-places"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
+app = Flask(__name__)
 
-# ── normalisation (mirrors musteri_ajan.py) ─────────────────────────────────
+
+# ── normalisation ────────────────────────────────────────────────────────────
 
 def _collect_emails(item: dict) -> list[str]:
     emails: list[str] = []
@@ -99,10 +102,9 @@ def normalize(item: dict) -> dict:
     }
 
 
-# ── scoring ─────────────────────────────────────────────────────────────────
+# ── scoring ──────────────────────────────────────────────────────────────────
 
 def score_lead(lead: dict, query: str = "") -> dict:
-    # erisilebilirlik: email/phone/website varlığı
     e = 2
     if lead.get("emails"):
         e += 4
@@ -112,7 +114,6 @@ def score_lead(lead: dict, query: str = "") -> dict:
         e += 2
     erisilebilirlik = min(10, e)
 
-    # sinyal: rating × 2 + review bonus
     rating = lead.get("rating") or 0
     reviews = lead.get("reviews_count") or 0
     sinyal: float = round(min(10.0, float(rating) * 2), 1) if rating else 4.0
@@ -121,7 +122,6 @@ def score_lead(lead: dict, query: str = "") -> dict:
     elif reviews >= 50:
         sinyal = min(10.0, sinyal + 0.5)
 
-    # sektor_uyumu: tüm sonuçlar sorgudan geldiği için baz 7
     su = 7.0
     category = (lead.get("category") or "").lower()
     query_words = [w for w in query.lower().split() if len(w) > 2]
@@ -134,7 +134,6 @@ def score_lead(lead: dict, query: str = "") -> dict:
 
     toplam = round(su * 0.5 + erisilebilirlik * 0.3 + sinyal * 0.2, 1)
 
-    # kısa "neden uygun" notu
     bits = []
     if lead.get("emails"):
         bits.append("email var")
@@ -142,8 +141,9 @@ def score_lead(lead: dict, query: str = "") -> dict:
         bits.append("tel var")
     if lead.get("website"):
         bits.append("website açık")
-    if isinstance(rating, (int, float)) and rating >= 4.0:
-        bits.append(f"{rating:.1f}★")
+    r = lead.get("rating")
+    if isinstance(r, (int, float)) and r >= 4.0:
+        bits.append(f"{r:.1f}★")
     if reviews and reviews >= 50:
         bits.append(f"{int(reviews)} yorum")
     if not bits:
@@ -200,71 +200,74 @@ def run_scrape(query: str, location: str, max_results: int, language: str = "tr"
     return items[:MAX_LEADS_CAP]
 
 
-# ── handler ──────────────────────────────────────────────────────────────────
+# ── Flask route ───────────────────────────────────────────────────────────────
 
-class handler(BaseHTTPRequestHandler):
+def _cors(resp: Any) -> Any:
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
 
-    def do_OPTIONS(self) -> None:
-        self.send_response(200)
-        self._cors()
-        self.end_headers()
 
-    def do_POST(self) -> None:
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length else b"{}"
-            data: dict[str, Any] = json.loads(body)
-        except Exception:
-            return self._json({"error": "Geçersiz JSON."}, 400)
+@app.route("/", methods=["POST", "OPTIONS"])
+@app.route("/api/scrape", methods=["POST", "OPTIONS"])
+def scrape_endpoint():
+    if request.method == "OPTIONS":
+        return _cors(make_response("", 200))
 
-        query = (data.get("query") or "").strip()
-        location = (data.get("location") or "").strip()
-        try:
-            max_results = max(1, min(int(data.get("max", MAX_LEADS_CAP)), MAX_LEADS_CAP))
-        except (TypeError, ValueError):
-            max_results = MAX_LEADS_CAP
-        language = data.get("language", "tr")
+    try:
+        data: dict[str, Any] = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        return _cors(make_response(
+            json.dumps({"error": "Geçersiz JSON."}, ensure_ascii=False), 400,
+            {"Content-Type": "application/json"}
+        ))
 
-        if not query or not location:
-            return self._json({"error": "query ve location zorunludur."}, 400)
+    query = (data.get("query") or "").strip()
+    location = (data.get("location") or "").strip()
+    try:
+        max_results = max(1, min(int(data.get("max", MAX_LEADS_CAP)), MAX_LEADS_CAP))
+    except (TypeError, ValueError):
+        max_results = MAX_LEADS_CAP
+    language = data.get("language", "tr")
 
-        try:
-            raw = run_scrape(query, location, max_results, language)
-        except ValueError as exc:
-            return self._json({"error": str(exc)}, 500)
-        except Exception as exc:
-            return self._json({"error": f"Tarama başarısız: {exc}"}, 500)
+    if not query or not location:
+        return _cors(make_response(
+            json.dumps({"error": "query ve location zorunludur."}, ensure_ascii=False), 400,
+            {"Content-Type": "application/json"}
+        ))
 
-        leads = [score_lead(normalize(x), query) for x in raw]
-        leads.sort(key=lambda x: x.get("toplam_skor", 0), reverse=True)
-        for i, lead in enumerate(leads, 1):
-            lead["rank"] = i
+    try:
+        raw = run_scrape(query, location, max_results, language)
+    except ValueError as exc:
+        return _cors(make_response(
+            json.dumps({"error": str(exc)}, ensure_ascii=False), 500,
+            {"Content-Type": "application/json"}
+        ))
+    except Exception as exc:
+        return _cors(make_response(
+            json.dumps({"error": f"Tarama başarısız: {exc}"}, ensure_ascii=False), 500,
+            {"Content-Type": "application/json"}
+        ))
 
-        self._json({
-            "query": query,
-            "location": location,
-            "language": language,
-            "max_limit": MAX_LEADS_CAP,
-            "requested": max_results,
-            "count": len(leads),
-            "fetched_at": datetime.now().isoformat(timespec="seconds"),
-            "actor": DEFAULT_ACTOR,
-            "leads": leads,
-        })
+    leads = [score_lead(normalize(x), query) for x in raw]
+    leads.sort(key=lambda x: x.get("toplam_skor", 0), reverse=True)
+    for i, lead in enumerate(leads, 1):
+        lead["rank"] = i
 
-    def _cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
-    def _json(self, data: Any, code: int = 200) -> None:
-        body = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(code)
-        self._cors()
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, fmt: str, *args: Any) -> None:
-        pass
+    result = {
+        "query": query,
+        "location": location,
+        "language": language,
+        "max_limit": MAX_LEADS_CAP,
+        "requested": max_results,
+        "count": len(leads),
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "actor": DEFAULT_ACTOR,
+        "leads": leads,
+    }
+    return _cors(make_response(
+        json.dumps(result, ensure_ascii=False),
+        200,
+        {"Content-Type": "application/json; charset=utf-8"}
+    ))
