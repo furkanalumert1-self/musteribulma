@@ -2,7 +2,7 @@
 name = "musteribulma"
 version = "0.1.0"
 description = "Türkiye B2B lead generation — Apify + Flask"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "apify-client>=1.7.0",
     "flask>=3.0.0",
