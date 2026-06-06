@@ -202,11 +202,39 @@ def run_scrape(query: str, location: str, max_results: int, language: str = "tr"
 
 # ── Flask route ───────────────────────────────────────────────────────────────
 
+import os as _os
+
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+
+
 def _cors(resp: Any) -> Any:
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
+
+
+def _send_html(filename: str):
+    from flask import send_file as _sf  # noqa: PLC0415
+    path = _os.path.join(_ROOT, filename)
+    if _os.path.exists(path):
+        return _sf(path, mimetype="text/html")
+    return make_response("Not found", 404)
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return _send_html("index.html")
+
+
+@app.route("/dashboard.html", methods=["GET"])
+def dashboard():
+    return _send_html("dashboard.html")
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "healthy", "app": "musteribulma"}
 
 
 @app.route("/", methods=["POST", "OPTIONS"])
