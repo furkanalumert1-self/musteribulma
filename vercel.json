@@ -1,7 +1,6 @@
 {
   "functions": {
     "api/scrape.py": {
-      "runtime": "python3.11",
       "maxDuration": 300
     }
   }
