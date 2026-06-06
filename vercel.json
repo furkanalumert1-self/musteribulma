@@ -1,18 +1,8 @@
-```json
 {
-  "
-version": 2,
-  "builds": [
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python"
+  "functions": {
+    "api/scrape.py": {
+      "runtime": "python3.11",
+      "maxDuration": 300
     }
-  ],
-  "routes": [
-    {
-      "src": "/api",
-      "dest": "api/index.py"
-    }
-  ]
+  }
 }
-```
