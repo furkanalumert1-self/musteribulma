@@ -21,11 +21,18 @@ from flask import Flask, make_response, request
 MAX_LEADS_CAP = 50
 DEFAULT_ACTOR = "compass/crawler-google-places"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_DIGITS_RE = re.compile(r"\d{5,}")
 
 app = Flask(__name__)
 
 
 # ── normalisation ────────────────────────────────────────────────────────────
+
+def _valid_email(raw: str) -> bool:
+    """Telefon+email yapışık gelen sahte adresleri (ör. +905551234info@x.com) eler."""
+    local = raw.split("@")[0]
+    return not local.startswith("+") and not _DIGITS_RE.search(local)
+
 
 def _collect_emails(item: dict) -> list[str]:
     emails: list[str] = []
@@ -50,10 +57,15 @@ def _collect_emails(item: dict) -> list[str]:
     out: list[str] = []
     for e in emails:
         e2 = e.strip().lower()
-        if e2 and e2 not in seen:
+        if e2 and e2 not in seen and _valid_email(e2):
             seen.add(e2)
             out.append(e2)
     return out
+
+
+def _normalize_phone(p: str) -> str:
+    """Karşılaştırma için sadece rakamları bırakır (boşluk/tire/parantez siler)."""
+    return re.sub(r"[^\d+]", "", p)
 
 
 def _collect_phones(item: dict) -> list[str]:
@@ -69,12 +81,15 @@ def _collect_phones(item: dict) -> list[str]:
         v = contacts.get("phones")
         if isinstance(v, list):
             phones.extend(p for p in v if isinstance(p, str))
-    seen: set[str] = set()
+    seen_norm: set[str] = set()
     out: list[str] = []
     for p in phones:
         p2 = p.strip()
-        if p2 and p2 not in seen:
-            seen.add(p2)
+        if not p2:
+            continue
+        norm = _normalize_phone(p2)
+        if norm and norm not in seen_norm:
+            seen_norm.add(norm)
             out.append(p2)
     return out
 
