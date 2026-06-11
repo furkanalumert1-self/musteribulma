@@ -178,6 +178,17 @@ def _apify_client():
     return ApifyClient(api_key)
 
 
+def _to_dict(obj) -> dict | None:
+    """apify-client >=1.7 Pydantic modelini dict'e çevirir; alias'ları korur."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(by_alias=True, mode="json")
+    return vars(obj)
+
+
 # ── Flask routes ─────────────────────────────────────────────────────────────
 
 import os as _os
@@ -279,17 +290,19 @@ def start_scrape():
 def scrape_status(run_id: str):
     try:
         client = _apify_client()
-        run_info = client.run(run_id).get()
+        run_info = _to_dict(client.run(run_id).get())
         if not run_info:
             return _json({"error": "Run bilgisi alınamadı."}, 500)
         status = run_info.get("status", "UNKNOWN")
         stats  = run_info.get("stats") or {}
+        if isinstance(stats, object) and hasattr(stats, "get") is False:
+            stats = {}
         return _cors(make_response(
             json.dumps({
                 "run_id": run_id,
                 "status": status,
                 "done": status in _APIFY_TERMINAL,
-                "items_scraped": stats.get("itemsScraped", 0),
+                "items_scraped": stats.get("itemsScraped", 0) if isinstance(stats, dict) else 0,
             }, ensure_ascii=False),
             200,
             {"Content-Type": "application/json"},
@@ -310,7 +323,7 @@ def scrape_results(run_id: str):
 
     try:
         client   = _apify_client()
-        run_info = client.run(run_id).get()
+        run_info = _to_dict(client.run(run_id).get())
     except ValueError as exc:
         return _json({"error": str(exc)}, 500)
     except Exception as exc:
