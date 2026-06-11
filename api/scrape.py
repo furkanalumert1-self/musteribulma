@@ -1,5 +1,9 @@
 """
-Vercel serverless endpoint — POST /api/scrape
+Vercel serverless endpoint — Async Apify pattern
+
+POST /api/scrape           → Apify run başlat, run_id döndür (< 2s)
+GET  /api/status/<run_id>  → Apify run durumunu sorgula    (< 3s)
+GET  /api/results/<run_id> → Sonuçları çek ve puanla       (< 10s)
 
 Body (JSON): {"query": "...", "location": "...", "max": 50}
 Env:         APIFY_API_TOKEN
@@ -9,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from flask import Flask, make_response, request
@@ -160,47 +164,21 @@ def score_lead(lead: dict, query: str = "") -> dict:
     }
 
 
-# ── apify scrape ─────────────────────────────────────────────────────────────
+# ── apify helpers ────────────────────────────────────────────────────────────
 
-def run_scrape(query: str, location: str, max_results: int, language: str = "tr") -> list[dict]:
+_APIFY_TERMINAL = {"SUCCEEDED", "FAILED", "TIMED-OUT", "ABORTED"}
+_APIFY_RUNNING  = {"READY", "RUNNING"}
+
+
+def _apify_client():
     from apify_client import ApifyClient  # noqa: PLC0415
-
     api_key = os.environ.get("APIFY_API_TOKEN", "").strip()
     if not api_key:
         raise ValueError("APIFY_API_TOKEN ortam değişkeni ayarlanmamış.")
-
-    max_results = max(1, min(max_results, MAX_LEADS_CAP))
-    client = ApifyClient(api_key)
-
-    run = client.actor(DEFAULT_ACTOR).call(
-        run_input={
-            "searchStringsArray": [query],
-            "locationQuery": location,
-            "maxCrawledPlacesPerSearch": max_results,
-            "language": language,
-            "skipClosedPlaces": True,
-            "scrapeContacts": True,
-        },
-        run_timeout=timedelta(minutes=8),
-        wait_duration=timedelta(minutes=8),
-    )
-
-    dataset_id = None
-    if run is not None:
-        dataset_id = (run.get("defaultDatasetId") if isinstance(run, dict)
-                      else getattr(run, "default_dataset_id", None))
-    if not dataset_id:
-        raise RuntimeError("Apify çalıştırılamadı veya dataset id dönmedi.")
-
-    items: list[dict] = []
-    for it in client.dataset(dataset_id).iterate_items():
-        items.append(it)
-        if len(items) >= max_results:
-            break
-    return items[:MAX_LEADS_CAP]
+    return ApifyClient(api_key)
 
 
-# ── Flask route ───────────────────────────────────────────────────────────────
+# ── Flask routes ─────────────────────────────────────────────────────────────
 
 import os as _os
 
@@ -209,9 +187,17 @@ _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 
 def _cors(resp: Any) -> Any:
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
+
+
+def _json(data: Any, code: int = 200) -> Any:
+    return _cors(make_response(
+        json.dumps(data, ensure_ascii=False),
+        code,
+        {"Content-Type": "application/json; charset=utf-8"},
+    ))
 
 
 def _send_html(filename: str):
@@ -221,6 +207,8 @@ def _send_html(filename: str):
         return _sf(path, mimetype="text/html")
     return make_response("Not found", 404)
 
+
+# ── static pages ─────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def home():
@@ -234,24 +222,18 @@ def dashboard():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return {"status": "healthy", "app": "musteribulma"}
+    return _json({"status": "healthy", "app": "musteribulma"})
 
 
-@app.route("/", methods=["POST", "OPTIONS"])
+# ── POST /api/scrape  →  Apify run başlat, hemen run_id döndür (~1s) ─────────
+
 @app.route("/api/scrape", methods=["POST", "OPTIONS"])
-def scrape_endpoint():
+def start_scrape():
     if request.method == "OPTIONS":
         return _cors(make_response("", 200))
 
-    try:
-        data: dict[str, Any] = request.get_json(force=True, silent=True) or {}
-    except Exception:
-        return _cors(make_response(
-            json.dumps({"error": "Geçersiz JSON."}, ensure_ascii=False), 400,
-            {"Content-Type": "application/json"}
-        ))
-
-    query = (data.get("query") or "").strip()
+    data: dict[str, Any] = request.get_json(force=True, silent=True) or {}
+    query    = (data.get("query") or "").strip()
     location = (data.get("location") or "").strip()
     try:
         max_results = max(1, min(int(data.get("max", MAX_LEADS_CAP)), MAX_LEADS_CAP))
@@ -260,42 +242,109 @@ def scrape_endpoint():
     language = data.get("language", "tr")
 
     if not query or not location:
-        return _cors(make_response(
-            json.dumps({"error": "query ve location zorunludur."}, ensure_ascii=False), 400,
-            {"Content-Type": "application/json"}
-        ))
+        return _json({"error": "query ve location zorunludur."}, 400)
 
     try:
-        raw = run_scrape(query, location, max_results, language)
+        client = _apify_client()
+        run = client.actor(DEFAULT_ACTOR).start(run_input={
+            "searchStringsArray": [query],
+            "locationQuery": location,
+            "maxCrawledPlacesPerSearch": max_results,
+            "language": language,
+            "skipClosedPlaces": True,
+            "scrapeContacts": True,
+        })
     except ValueError as exc:
-        return _cors(make_response(
-            json.dumps({"error": str(exc)}, ensure_ascii=False), 500,
-            {"Content-Type": "application/json"}
-        ))
+        return _json({"error": str(exc)}, 500)
     except Exception as exc:
-        return _cors(make_response(
-            json.dumps({"error": f"Tarama başarısız: {exc}"}, ensure_ascii=False), 500,
-            {"Content-Type": "application/json"}
-        ))
+        return _json({"error": f"Apify başlatılamadı: {exc}"}, 500)
 
-    leads = [score_lead(normalize(x), query) for x in raw]
+    run_id = run.get("id") if isinstance(run, dict) else getattr(run, "id", None)
+    if not run_id:
+        return _json({"error": "Apify run id alınamadı."}, 500)
+
+    return _json({
+        "run_id": run_id,
+        "status": "RUNNING",
+        "query": query,
+        "location": location,
+        "max": max_results,
+        "language": language,
+    })
+
+
+# ── GET /api/status/<run_id>  →  Apify run durumunu sorgula (~1s) ────────────
+
+@app.route("/api/status/<run_id>", methods=["GET"])
+def scrape_status(run_id: str):
+    try:
+        client = _apify_client()
+        run_info = client.run(run_id).get()
+    except ValueError as exc:
+        return _json({"error": str(exc)}, 500)
+    except Exception as exc:
+        return _json({"error": f"Durum sorgulanamadı: {exc}"}, 500)
+
+    status = run_info.get("status", "UNKNOWN")
+    stats  = run_info.get("stats", {})
+    return _cors(make_response(
+        json.dumps({
+            "run_id": run_id,
+            "status": status,
+            "done": status in _APIFY_TERMINAL,
+            "items_scraped": stats.get("itemsScraped", 0),
+        }, ensure_ascii=False),
+        200,
+        {"Content-Type": "application/json"},
+    ))
+
+
+# ── GET /api/results/<run_id>  →  Sonuçları çek ve puanla (~5s) ──────────────
+
+@app.route("/api/results/<run_id>", methods=["GET"])
+def scrape_results(run_id: str):
+    query    = request.args.get("query", "")
+    location = request.args.get("location", "")
+    language = request.args.get("language", "tr")
+
+    try:
+        client   = _apify_client()
+        run_info = client.run(run_id).get()
+    except ValueError as exc:
+        return _json({"error": str(exc)}, 500)
+    except Exception as exc:
+        return _json({"error": f"Run bilgisi alınamadı: {exc}"}, 500)
+
+    status = run_info.get("status", "")
+    if status != "SUCCEEDED":
+        return _json({"error": f"Run henüz tamamlanmadı (status: {status})."}, 400)
+
+    dataset_id = run_info.get("defaultDatasetId")
+    if not dataset_id:
+        return _json({"error": "Dataset id bulunamadı."}, 500)
+
+    try:
+        items: list[dict] = []
+        for it in client.dataset(dataset_id).iterate_items():
+            items.append(it)
+            if len(items) >= MAX_LEADS_CAP:
+                break
+    except Exception as exc:
+        return _json({"error": f"Veri çekilemedi: {exc}"}, 500)
+
+    leads = [score_lead(normalize(x), query) for x in items]
     leads.sort(key=lambda x: x.get("toplam_skor", 0), reverse=True)
     for i, lead in enumerate(leads, 1):
         lead["rank"] = i
 
-    result = {
+    return _json({
+        "run_id": run_id,
         "query": query,
         "location": location,
         "language": language,
         "max_limit": MAX_LEADS_CAP,
-        "requested": max_results,
         "count": len(leads),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "actor": DEFAULT_ACTOR,
         "leads": leads,
-    }
-    return _cors(make_response(
-        json.dumps(result, ensure_ascii=False),
-        200,
-        {"Content-Type": "application/json; charset=utf-8"}
-    ))
+    })

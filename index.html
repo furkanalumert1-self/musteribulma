@@ -381,16 +381,65 @@ $('lead-form').addEventListener('submit', async e => {
   }
 
   setLoading(true);
+  $('loading-detail').textContent = 'Apify başlatılıyor…';
+
+  let pollInterval = null;
+
+  function stopPolling() {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    setLoading(false);
+  }
+
   try {
-    const res = await fetch('/api/scrape', {
+    // 1. Start scrape — returns run_id immediately
+    const startRes = await fetch('/api/scrape', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, location, max }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    displayResults(data);
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.error || `HTTP ${startRes.status}`);
+
+    const runId = startData.run_id;
+    $('loading-detail').textContent = 'Google Maps taranıyor… (0 kayıt)';
+
+    // 2. Poll status every 5 seconds
+    await new Promise((resolve, reject) => {
+      pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`/api/status/${runId}`);
+          const statusData = await statusRes.json();
+          if (!statusRes.ok) { reject(new Error(statusData.error || `HTTP ${statusRes.status}`)); return; }
+
+          const scraped = statusData.items_scraped ?? 0;
+          $('loading-detail').textContent = `Google Maps taranıyor… (${scraped} kayıt bulundu)`;
+
+          if (statusData.done) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+            if (statusData.status === 'SUCCEEDED') {
+              resolve();
+            } else {
+              reject(new Error(`Apify run başarısız oldu: ${statusData.status}`));
+            }
+          }
+        } catch (err) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+          reject(err);
+        }
+      }, 5000);
+    });
+
+    // 3. Fetch and display results
+    $('loading-detail').textContent = 'Sonuçlar işleniyor…';
+    const resultsRes = await fetch(`/api/results/${runId}?query=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}`);
+    const resultsData = await resultsRes.json();
+    if (!resultsRes.ok) throw new Error(resultsData.error || `HTTP ${resultsRes.status}`);
+    displayResults(resultsData);
+
   } catch (err) {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     showError(err.message);
   } finally {
     setLoading(false);
