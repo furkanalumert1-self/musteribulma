@@ -280,23 +280,24 @@ def scrape_status(run_id: str):
     try:
         client = _apify_client()
         run_info = client.run(run_id).get()
+        if not run_info:
+            return _json({"error": "Run bilgisi alınamadı."}, 500)
+        status = run_info.get("status", "UNKNOWN")
+        stats  = run_info.get("stats") or {}
+        return _cors(make_response(
+            json.dumps({
+                "run_id": run_id,
+                "status": status,
+                "done": status in _APIFY_TERMINAL,
+                "items_scraped": stats.get("itemsScraped", 0),
+            }, ensure_ascii=False),
+            200,
+            {"Content-Type": "application/json"},
+        ))
     except ValueError as exc:
         return _json({"error": str(exc)}, 500)
     except Exception as exc:
         return _json({"error": f"Durum sorgulanamadı: {exc}"}, 500)
-
-    status = run_info.get("status", "UNKNOWN")
-    stats  = run_info.get("stats", {})
-    return _cors(make_response(
-        json.dumps({
-            "run_id": run_id,
-            "status": status,
-            "done": status in _APIFY_TERMINAL,
-            "items_scraped": stats.get("itemsScraped", 0),
-        }, ensure_ascii=False),
-        200,
-        {"Content-Type": "application/json"},
-    ))
 
 
 # ── GET /api/results/<run_id>  →  Sonuçları çek ve puanla (~5s) ──────────────
@@ -314,6 +315,9 @@ def scrape_results(run_id: str):
         return _json({"error": str(exc)}, 500)
     except Exception as exc:
         return _json({"error": f"Run bilgisi alınamadı: {exc}"}, 500)
+
+    if not run_info:
+        return _json({"error": "Run bilgisi alınamadı."}, 500)
 
     status = run_info.get("status", "")
     if status != "SUCCEEDED":
